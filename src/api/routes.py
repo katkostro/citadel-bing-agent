@@ -32,6 +32,8 @@ from azure.ai.projects.models import (
    EvaluatorIds
 )
 
+from .bing_grounding_tool import BingGroundingTool, execute_bing_search_function
+
 
 # Create a logger for this module
 logger = logging.getLogger("azureaiapp")
@@ -126,6 +128,14 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
         self.agent_client = ai_project.agents
         self.ai_project = ai_project
         self.app_insights_conn_str = app_insights_conn_str
+        
+        # Initialize Bing Grounding tool if API key is available
+        self.bing_tool = None
+        bing_subscription_key = os.getenv('BING_SEARCH_API_KEY')
+        if bing_subscription_key:
+            bing_endpoint = os.getenv('BING_SEARCH_ENDPOINT', 'https://api.bing.microsoft.com/')
+            self.bing_tool = BingGroundingTool(bing_subscription_key, bing_endpoint)
+            logger.info("MyEventHandler: Bing Grounding tool initialized")
 
     async def on_message_delta(self, delta: MessageDeltaChunk) -> Optional[str]:
         stream_data = {'content': delta.text, 'type': "message"}
@@ -175,10 +185,35 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
         if tool_calls:
             logger.info("Tool calls:")
             for call in tool_calls:
+                # Handle Azure AI Search
                 azure_ai_search_details = call.get("azure_ai_search", {})
                 if azure_ai_search_details:
                     logger.info(f"azure_ai_search input: {azure_ai_search_details.get('input')}")
                     logger.info(f"azure_ai_search output: {azure_ai_search_details.get('output')}")
+                
+                # Handle function calls (including Bing grounding)
+                function_details = call.get("function", {})
+                if function_details:
+                    function_name = function_details.get("name", "")
+                    logger.info(f"function call: {function_name}")
+                    
+                    # Handle official Bing grounding function calls
+                    if "bing" in function_name.lower() or "grounding" in function_name.lower():
+                        logger.info("Official Bing grounding function called")
+                        # The BingGroundingToolDefinition handles execution automatically
+                    
+                    # Log any other function calls for debugging
+                    else:
+                        logger.info(f"Other function call detected: {function_name}")
+                        arguments = function_details.get("arguments", {})
+                        logger.info(f"Function arguments: {arguments}")
+                
+                # Handle other tool types
+                for tool_type in call.keys():
+                    if tool_type not in ["azure_ai_search", "function"]:
+                        logger.info(f"Other tool type called: {tool_type}")
+                        tool_details = call.get(tool_type, {})
+                        logger.info(f"Tool details: {tool_details}")
         return None
 
 @router.get("/", response_class=HTMLResponse)
@@ -202,6 +237,7 @@ async def get_result(
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
     with tracer.start_as_current_span('get_result', context=ctx):
         logger.info(f"get_result invoked for thread_id={thread_id} and agent_id={agent_id}")
+        current_run_id = None
         try:
             agent_client = ai_project.agents
             async with await agent_client.runs.stream(
@@ -210,17 +246,53 @@ async def get_result(
                 event_handler=MyEventHandler(ai_project, app_insight_conn_str),
             ) as stream:
                 logger.info("Successfully created stream; starting to process events")
+                stream_completed = False
                 async for event in stream:
-                    _, _, event_func_return_val = event
+                    event_type, event_data, event_func_return_val = event
                     logger.debug(f"Received event: {event}")
+                    
+                    # Track the run ID from thread run events
+                    if event_type == "thread.run" and hasattr(event_data, 'id'):
+                        current_run_id = event_data.id
+                        logger.info(f"Tracking run ID: {current_run_id}")
+                    
                     if event_func_return_val:
                         logger.info(f"Yielding event: {event_func_return_val}")
                         yield event_func_return_val
+                        
+                        # Check if this is the stream end event
+                        if '"type": "stream_end"' in event_func_return_val:
+                            stream_completed = True
                     else:
                         logger.debug("Event received but no data to yield")
+                
+                logger.info(f"Stream processing completed normally: {stream_completed}")
+                        
         except Exception as e:
             logger.exception(f"Exception in get_result: {e}")
+            
+            # If we have a run ID and the stream was interrupted, try to cancel the run
+            if current_run_id:
+                try:
+                    logger.info(f"Stream interrupted, attempting to cancel run {current_run_id}")
+                    await agent_client.runs.cancel(thread_id=thread_id, run_id=current_run_id)
+                    logger.info(f"Successfully cancelled interrupted run {current_run_id}")
+                except Exception as cancel_error:
+                    logger.error(f"Failed to cancel interrupted run {current_run_id}: {cancel_error}")
+            
             yield serialize_sse_event({'type': "error", 'message': str(e)})
+        finally:
+            # Additional cleanup check - if we tracked a run and don't know if it completed
+            if current_run_id:
+                try:
+                    # Check the run status one more time
+                    run_status = await agent_client.runs.get(thread_id=thread_id, run_id=current_run_id)
+                    if run_status.status in ["queued", "in_progress", "requires_action"]:
+                        logger.warning(f"Run {current_run_id} still active after stream ended, cancelling...")
+                        await agent_client.runs.cancel(thread_id=thread_id, run_id=current_run_id)
+                        logger.info(f"Cancelled orphaned run {current_run_id}")
+                except Exception as cleanup_error:
+                    logger.error(f"Error during run cleanup for {current_run_id}: {cleanup_error}")
 
 
 @router.get("/chat/history")
@@ -321,13 +393,16 @@ async def chat(
             raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {e}")
 
         logger.info(f"user_message: {user_message}")
-
+        
+        # Get the user's message directly
+        original_message = user_message.get('message', '')
+        
         # Create a new message from the user's input.
         try:
             message = await agent_client.messages.create(
                 thread_id=thread_id,
                 role="user",
-                content=user_message.get('message', '')
+                content=original_message
             )
             logger.info(f"Created message, message ID: {message.id}")
         except Exception as e:

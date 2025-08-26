@@ -119,6 +119,11 @@ param templateValidationMode bool = false
 @description('Random seed to be used during generation of new resources suffixes.')
 param seed string = newGuid()
 
+@description('Enable Bing Search connection for web search capabilities')
+param enableBingSearch bool = true
+@description('The Bing Search connection name. If omitted will use a default value')
+param bingConnectionName string = 'bing-search-connection'
+
 var runnerPrincipalType = templateValidationMode? 'ServicePrincipal' : 'User'
 
 var abbrs = loadJsonContent('./abbreviations.json')
@@ -180,20 +185,14 @@ var logAnalyticsWorkspaceResolvedName = !useApplicationInsights
 var resolvedSearchServiceName = !useSearchService
   ? ''
   : !empty(searchServiceName) ? searchServiceName : '${abbrs.searchSearchServices}${resourceToken}'
-
-// Bing Search for web search capabilities
-module bingSearch 'core/search/bing-search.bicep' = {
-  name: 'bing-search'
-  scope: rg
-  params: {
-    name: 'bing-${resourceToken}'
-    tags: tags
-  }
-}
+  
 
 module ai 'core/host/ai-environment.bicep' = if (empty(azureExistingAIProjectResourceId)) {
   name: 'ai'
   scope: rg
+  dependsOn: [
+    bingSearch
+  ]
   params: {
     location: location
     tags: tags
@@ -210,9 +209,9 @@ module ai 'core/host/ai-environment.bicep' = if (empty(azureExistingAIProjectRes
     searchServiceName: resolvedSearchServiceName
     appInsightConnectionName: 'appinsights-connection'
     aoaiConnectionName: 'aoai-connection'
-    enableBingSearch: true
-    bingSearchResourceId: bingSearch.outputs.resourceId
-    bingConnectionName: 'bing-search-connection'
+    enableBingSearch: enableBingSearch
+    bingSearchResourceId: enableBingSearch ? bingSearch!.outputs.resourceId : ''
+    bingConnectionName: bingConnectionName
   }
 }
 
@@ -285,6 +284,25 @@ module containerApps 'core/host/container-apps.bicep' = {
   }
 }
 
+// Bing Search resource (conditional)
+module bingSearch 'core/search/bing-search.bicep' = if (enableBingSearch) {
+  name: 'bing-search'
+  scope: rg
+  params: {
+    name: 'bing-${resourceToken}'
+    tags: tags
+  }
+}
+
+// Get Bing Search API key (conditional)
+module bingSearchKey 'core/search/bing-search-key.bicep' = if (enableBingSearch) {
+  name: 'bing-search-key'
+  scope: rg
+  params: {
+    bingSearchName: enableBingSearch ? bingSearch!.outputs.name : ''
+  }
+}
+
 // API app
 module api 'api.bicep' = {
   name: 'api'
@@ -308,6 +326,9 @@ module api 'api.bicep' = {
     enableAzureMonitorTracing: enableAzureMonitorTracing
     azureTracingGenAIContentRecordingEnabled: azureTracingGenAIContentRecordingEnabled
     projectEndpoint: projectEndpoint
+    bingSearchEndpoint: enableBingSearch ? bingSearch!.outputs.endpoint : ''
+    bingSearchApiKey: enableBingSearch ? bingSearchKey!.outputs.apiKey : ''
+    bingConnectionName: bingConnectionName
   }
 }
 
@@ -332,6 +353,17 @@ module userCognitiveServicesUser  'core/security/role.bicep' = if (empty(azureEx
     roleDefinitionId: 'a97b65f3-24c7-4388-baec-2e87135dc908'
   }
 }
+
+// Create Bing connection for existing AI project if needed (disabled for now)
+// module existingProjectBingConnection 'core/ai/bing-connection.bicep' = if (!empty(azureExistingAIProjectResourceId) && enableBingSearch) {
+//   name: 'existing-project-bing-connection'
+//   scope: existingProjectRG
+//   params: {
+//     aiServiceName: split(azureExistingAIProjectResourceId, '/')[8] // Extract service name from resource ID
+//     bingSearchApiKey: ''
+//     bingConnectionName: bingConnectionName
+//   }
+// }
 
 module userAzureAIUser  'core/security/role.bicep' = if (empty(azureExistingAIProjectResourceId)) {
   name: 'user-role-azure-ai-user'
@@ -434,18 +466,6 @@ module backendRoleAzureAIDeveloperRG 'core/security/role.bicep' = {
   }
 }
 
-// Bing Search connection for existing AI projects
-module bingConnection 'core/ai/bing-connection.bicep' = if (!empty(azureExistingAIProjectResourceId)) {
-  name: 'bing-connection'
-  scope: existingProjectRG
-  params: {
-    aiServiceName: split(azureExistingAIProjectResourceId, '/')[8] // Extract AI service name from resource ID
-    projectName: split(azureExistingAIProjectResourceId, '/')[10] // Extract project name from resource ID
-    bingSearchResourceId: bingSearch.outputs.resourceId
-    bingConnectionName: 'bing-search-connection'
-  }
-}
-
 output AZURE_RESOURCE_GROUP string = rg.name
 
 // Outputs required for local development server
@@ -471,3 +491,6 @@ output SERVICE_API_URI string = api.outputs.SERVICE_API_URI
 output SERVICE_API_ENDPOINTS array = ['${api.outputs.SERVICE_API_URI}']
 output SEARCH_CONNECTION_ID string = ''
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerApps.outputs.registryLoginServer
+output BING_CONNECTION_ID string = empty(azureExistingAIProjectResourceId) 
+  ? (enableBingSearch ? ai!.outputs.bingConnectionId : '')
+  : ''

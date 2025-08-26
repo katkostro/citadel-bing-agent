@@ -1,0 +1,32 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {},
+    "resources": [
+        {
+            "type": "Microsoft.CognitiveServices/accounts/connections",
+            "apiVersion": "2025-04-01-preview",
+            "name": "aoai-fwcesjjk2tcxa/bing-search-connection",
+            "properties": {
+                "category": "ApiKey",
+                "target": "https://api.bing.microsoft.com/",
+                "authType": "ApiKey",
+                "isSharedToAll": true,
+                "credentials": {
+                    "key": "[listKeys('/subscriptions/08149886-5d43-4f10-a04f-8ea5d38d739b/resourceGroups/citadel-bing-agent-rg/providers/Microsoft.Bing/accounts/bing-fwcesjjk2tcxa', '2020-06-10').key1]"
+                },
+                "metadata": {
+                    "ApiType": "Azure",
+                    "ResourceId": "/subscriptions/08149886-5d43-4f10-a04f-8ea5d38d739b/resourceGroups/citadel-bing-agent-rg/providers/Microsoft.Bing/accounts/bing-fwcesjjk2tcxa",
+                    "description": "Bing Search connection for real-time web search"
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "connectionId": {
+            "type": "string",
+            "value": "[resourceId('Microsoft.CognitiveServices/accounts/connections', 'aoai-fwcesjjk2tcxa', 'bing-search-connection')]"
+        }
+    }
+}

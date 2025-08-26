@@ -17,6 +17,9 @@ param agentID string
 param enableAzureMonitorTracing bool
 param azureTracingGenAIContentRecordingEnabled bool
 param projectEndpoint string
+param bingSearchEndpoint string = ''
+param bingSearchApiKey string = ''
+param bingConnectionName string = 'bing-search-connection'
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
@@ -79,6 +82,18 @@ var env = [
   {
     name: 'AZURE_EXISTING_AIPROJECT_ENDPOINT'
     value: projectEndpoint
+  }
+  {
+    name: 'BING_SEARCH_ENDPOINT'
+    value: bingSearchEndpoint
+  }
+  {
+    name: 'BING_SEARCH_API_KEY'
+    value: bingSearchApiKey
+  }
+  {
+    name: 'BING_CONNECTION_NAME'
+    value: bingConnectionName
   }
 ]
 

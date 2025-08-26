@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.36.177.2456",
-      "templateHash": "2251112834898660416"
+      "templateHash": "3461708963182960679"
     }
   },
   "parameters": {
@@ -523,7 +523,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.36.177.2456",
-              "templateHash": "12866460994632891167"
+              "templateHash": "6057326884200797317"
             }
           },
           "parameters": {
@@ -2402,7 +2402,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.36.177.2456",
-                      "templateHash": "13679908702936559652"
+                      "templateHash": "12207854425024038134"
                     },
                     "description": "Creates an Azure Cognitive Services instance."
                   },
@@ -2586,7 +2586,7 @@
                         "authType": "AAD",
                         "isSharedToAll": true,
                         "metadata": {
-                          "BingResourceId": "[parameters('bingSearchResourceId')]",
+                          "resourceId": "[parameters('bingSearchResourceId')]",
                           "description": "Bing Search connection for real-time web search"
                         }
                       },

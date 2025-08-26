@@ -29,6 +29,9 @@ The app code runs in Azure Container App to process the user input and generate 
 - **Knowledge Retrieval**<br/>
 The AI agent uses file search to retrieve knowledge from uploaded files.
 
+- **Web Search & Grounding**<br/>
+The AI agent can search the web using Bing Search API to find current, up-to-date information when needed.
+
 - **Customizable AI Model Deployment**<br/>
 The solution allows users to configure and deploy AI models, such as gpt-4o-mini, with options to adjust model capacity, and knowledge retrieval methods.
 
@@ -159,6 +162,14 @@ This template creates everything you need to get started with Azure AI Foundry:
 | [AI Search Service](https://learn.microsoft.com/azure/search/) | *Optional* - Enables hybrid search capabilities combining semantic and vector search |
 | [Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview) | *Optional* - Provides application performance monitoring, logging, and telemetry for debugging and optimization |
 | [Log Analytics Workspace](https://learn.microsoft.com/azure/azure-monitor/logs/log-analytics-workspace-overview) | *Optional* - Collects and analyzes telemetry data for monitoring and troubleshooting |
+| [Bing Search API](https://docs.microsoft.com/azure/cognitive-services/bing-web-search/) | *Optional* - Enables web search capabilities for grounding agent responses with current information |
+
+### Additional Features & Documentation
+
+For detailed setup and configuration guides:
+
+- **[Bing Grounding Setup](./docs/bing_grounding_setup.md)** - Configure web search capabilities for your agent
+- **[Deployment Customization](./docs/deploy_customization.md)** - Customize model deployments and other settings
 
 ## Troubleshooting
 

@@ -31,4 +31,4 @@ WORKDIR /code
 
 EXPOSE 50505
 
-CMD ["gunicorn", "api.main:create_app"]
+CMD ["gunicorn", "--config", "gunicorn_sk_conf.py", "main_sk:app"]

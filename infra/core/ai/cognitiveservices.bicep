@@ -13,6 +13,12 @@ param appInsightConnectionName string
 param aoaiConnectionName string
 param storageAccountId string
 param storageAccountConnectionName string
+@description('Enable Bing Search connection for web search capabilities')
+param enableBingSearch bool = false
+@description('The Bing Search resource ID for BingGrounding connection')
+param bingSearchResourceId string = ''
+@description('The Bing Search connection name.')
+param bingConnectionName string = 'bing-search-connection'
 
 @allowed([ 'Enabled', 'Disabled' ])
 param publicNetworkAccess string = 'Enabled'
@@ -97,6 +103,26 @@ resource storageAccountConnection 'Microsoft.CognitiveServices/accounts/connecti
   }
 }
 
+// Creates the Azure Foundry connection to Bing Search (conditional) - as a project-level connection with ApiKey auth
+resource bingSearchConnection 'Microsoft.CognitiveServices/accounts/projects/connections@2025-04-01-preview' = if (enableBingSearch) {
+  name: bingConnectionName
+  parent: aiProject
+  properties: {
+    category: 'ApiKey'
+    target: 'https://api.bing.microsoft.com/'
+    authType: 'ApiKey'
+    isSharedToAll: true
+    credentials: {
+      key: listKeys(bingSearchResourceId, '2020-06-10').key1
+    }
+    metadata: {
+      ApiType: 'Azure'
+      ResourceId: bingSearchResourceId
+      description: 'Bing Search connection for real-time web search'
+    }
+  }
+}
+
 resource aiProject 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-preview' = {
   parent: account
   name: aiProjectName
@@ -109,6 +135,31 @@ resource aiProject 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-pre
     description: aiProjectName
     displayName: aiProjectName
   }
+}
+
+// CRITICAL: Capability hosts enable agents to actually use tools
+// Account capability host enables the AI Services account to support agents
+resource accountCapabilityHost 'Microsoft.CognitiveServices/accounts/capabilityHosts@2025-04-01-preview' = {
+  name: '${aiServiceName}-caphost'
+  parent: account
+  properties: {
+    capabilityHostKind: 'Agents'
+  }
+  dependsOn: [
+    aiProject
+  ]
+}
+
+// Project capability host enables the project to use tools and connections
+resource projectCapabilityHost 'Microsoft.CognitiveServices/accounts/projects/capabilityHosts@2025-04-01-preview' = {
+  name: '${aiProjectName}-caphost'
+  parent: aiProject
+  properties: {
+    capabilityHostKind: 'Agents'
+  }
+  dependsOn: [
+    accountCapabilityHost
+  ]
 }
 
 @batchSize(1)
@@ -138,3 +189,4 @@ output projectEndpoint string = aiProject.properties.endpoints['AI Foundry API']
 output PrincipalId string = account.identity.principalId
 output accountPrincipalId string = account.identity.principalId
 output projectPrincipalId string = aiProject.identity.principalId
+output bingConnectionId string = enableBingSearch ? bingSearchConnection.id : ''

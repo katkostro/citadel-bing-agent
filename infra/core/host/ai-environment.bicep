@@ -20,6 +20,13 @@ param searchServiceName string = ''
 param appInsightConnectionName string
 param tags object = {}
 param aoaiConnectionName string
+@description('Enable Bing Search connection for web search capabilities')
+param enableBingSearch bool = false
+@description('The Bing Search resource ID for BingGrounding connection')
+param bingSearchResourceId string = ''
+@description('The Bing Search connection name.')
+param bingConnectionName string = 'bing-search-connection'
+
 module storageAccount '../storage/storage-account.bicep' = {
   name: 'storageAccount'
   params: {
@@ -87,12 +94,15 @@ module cognitiveServices '../ai/cognitiveservices.bicep' = {
     aiServiceName: aiServicesName
     aiProjectName: aiProjectName
     deployments: aiServiceModelDeployments
-    appInsightsId: applicationInsights.outputs.id
+    appInsightsId: !empty(applicationInsightsName) ? applicationInsights.outputs.id : ''
     appInsightConnectionName: appInsightConnectionName
-    appInsightConnectionString: applicationInsights.outputs.connectionString
+    appInsightConnectionString: !empty(applicationInsightsName) ? applicationInsights.outputs.connectionString : ''
     storageAccountId: storageAccount.outputs.id
     storageAccountConnectionName: storageAccount.outputs.name
     aoaiConnectionName: aoaiConnectionName
+    enableBingSearch: enableBingSearch
+    bingSearchResourceId: bingSearchResourceId
+    bingConnectionName: bingConnectionName
   }
 }
 
@@ -150,3 +160,4 @@ output searchServiceEndpoint string = !empty(searchServiceName) ? searchService.
 
 output projectResourceId string = cognitiveServices.outputs.projectResourceId
 output searchConnectionId string = !empty(searchServiceName) ? searchService.outputs.searchConnectionId : ''
+output bingConnectionId string = enableBingSearch ? cognitiveServices.outputs.bingConnectionId : ''

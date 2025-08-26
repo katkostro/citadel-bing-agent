@@ -11,16 +11,11 @@ import multiprocessing
 import os
 import sys
 
-from azure.ai.projects.aio import AIProjectClient
-from azure.ai.agents.models import (
-    Agent,
-    AsyncToolSet,
-    AzureAISearchTool,
-    FilePurpose,
-    FileSearchTool,
-    Tool,
-)
-from azure.ai.projects.models import ConnectionType, ApiKeyCredentials
+# Semantic Kernel imports
+from semantic_kernel import Kernel
+from semantic_kernel.connectors.ai.azure_ai_agent import AzureAIAgentService
+from semantic_kernel.connectors.ai.azure_ai_agent.models import BingGroundingToolDefinition
+from semantic_kernel.connectors.ai.azure_openai import AzureOpenAIChatCompletion
 from azure.identity.aio import DefaultAzureCredential
 from azure.core.credentials_async import AsyncTokenCredential
 
@@ -116,14 +111,17 @@ def _get_file_path(file_name: str) -> str:
 
 async def get_available_tool(
         project_client: AIProjectClient,
-        creds: AsyncTokenCredential) -> Tool:
+        creds: AsyncTokenCredential) -> tuple[list[Tool], bool]:
     """
-    Get the toolset and tool definition for the agent.
+    Get the toolset and tool definitions for the agent.
 
     :param ai_client: The project client to be used to create an index.
     :param creds: The credentials, used for the index.
-    :return: The tool set, available based on the environment.
+    :return: Tuple of (List of tools available based on the environment, boolean indicating if Bing tool was added)
     """
+    import os
+    tools = []
+    
     # File name -> {"id": file_id, "path": file_path}
     file_ids: List[str] = []
     # First try to get an index search.
@@ -135,13 +133,11 @@ async def get_available_tool(
                 conn_id = conn.id
                 break
 
-    toolset = AsyncToolSet()
     if conn_id:
         await create_index_maybe(project_client, creds)
-
-        return AzureAISearchTool(
+        tools.append(AzureAISearchTool(
             index_connection_id=conn_id,
-            index_name=os.environ.get('AZURE_AI_SEARCH_INDEX_NAME'))
+            index_name=os.environ.get('AZURE_AI_SEARCH_INDEX_NAME')))
     else:
         logger.info(
             "agent: index was not initialized, falling back to file search.")
@@ -160,18 +156,225 @@ async def get_available_tool(
             name="sample_store"
         )
         logger.info("agent: file store and vector store success")
+        tools.append(FileSearchTool(vector_store_ids=[vector_store.id]))
 
-        return FileSearchTool(vector_store_ids=[vector_store.id])
+    # Add Bing Grounding tool using Semantic Kernel
+    bing_tool_added = False
+    try:
+        # Check if there are any Bing connections available
+        connections_list = []
+        async for connection in project_client.connections.list():
+            connections_list.append(connection)
+        
+        # Look for Bing connection
+        bing_connection = None
+        for conn in connections_list:
+            conn_name = str(getattr(conn, 'name', ''))
+            if ('bing' in conn_name.lower() or conn_name == 'bing-search-connection'):
+                bing_connection = conn
+                break
+        
+        if bing_connection:
+            logger.info(f"agent: Found Bing connection: {bing_connection.name} (ID: {bing_connection.id})")
+            
+            # Try using Semantic Kernel's BingGroundingToolDefinition
+            try:
+                from semantic_kernel.connectors.ai.azure_ai_agent.models import BingGroundingToolDefinition
+                
+                # Create Bing grounding tool using Semantic Kernel approach
+                bing_grounding_tool = BingGroundingToolDefinition(
+                    connection_list=[{"id": bing_connection.id}]
+                )
+                tools.append(bing_grounding_tool)
+                logger.info("agent: Successfully added Semantic Kernel BingGroundingToolDefinition")
+                bing_tool_added = True
+                
+            except ImportError as e1:
+                logger.warning(f"agent: Semantic Kernel BingGroundingToolDefinition not available: {e1}")
+                # Fall back to custom function approach
+                logger.info("agent: Falling back to custom Bing search function")
+                
+                # Create custom Bing search function tool
+                async def search_web(query: str) -> str:
+                    """Search the web for current information using Bing Search API.
+                    
+                    Args:
+                        query: The search query to find current information about
+                        
+                    Returns:
+                        Search results with current information
+                    """
+                    try:
+                        import aiohttp
+                        import json
+                        
+                        # Get Bing API key from environment
+                        bing_api_key = os.getenv('BING_SEARCH_API_KEY')
+                        if not bing_api_key:
+                            return "Bing Search API key not configured"
+                        
+                        bing_endpoint = os.getenv('BING_SEARCH_ENDPOINT', 'https://api.bing.microsoft.com/') 
+                        search_url = f"{bing_endpoint.rstrip('/')}/v7.0/search"
+                        
+                        headers = {
+                            'Ocp-Apim-Subscription-Key': bing_api_key,
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        params = {
+                            'q': query,
+                            'count': 5,
+                            'offset': 0,
+                            'mkt': 'en-US',
+                            'safesearch': 'Moderate'
+                        }
+                        
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(search_url, headers=headers, params=params) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    
+                                    results = []
+                                    if 'webPages' in data and 'value' in data['webPages']:
+                                        for item in data['webPages']['value'][:3]:
+                                            results.append({
+                                                'title': item.get('name', ''),
+                                                'snippet': item.get('snippet', ''),
+                                                'url': item.get('url', '')
+                                            })
+                                    
+                                    if results:
+                                        formatted_results = []
+                                        for r in results:
+                                            formatted_results.append(f"**{r['title']}**\n{r['snippet']}\nSource: {r['url']}\n")
+                                        return "Here are the current search results:\n\n" + "\n".join(formatted_results)
+                                    else:
+                                        return "No search results found for the query."
+                                else:
+                                    return f"Bing Search API error: HTTP {response.status}"
+                                    
+                    except Exception as e:
+                        logger.error(f"Error in search_web function: {e}")
+                        return f"Error performing web search: {str(e)}"
+                
+                # Create the AsyncFunctionTool as fallback
+                search_tool = AsyncFunctionTool(search_web)
+                tools.append(search_tool)
+                bing_tool_added = True
+                logger.info("agent: Successfully added custom Bing search function tool as fallback")
+                
+            except Exception as e2:
+                logger.error(f"agent: Failed to create Semantic Kernel BingGroundingToolDefinition: {e2}")
+                logger.warning("agent: Bing grounding functionality unavailable")
+            
+        else:
+            logger.info("agent: No Bing connection found in AI project")
+            
+    except Exception as e:
+        logger.error(f"agent: Failed to initialize Bing search tool: {e}", exc_info=True)
+        logger.warning("agent: Continuing without Bing search functionality")
+    
+    return bing_tool_added
+
+    return tools, bing_tool_added
+
+
+async def update_existing_agent_with_tools(ai_client: AIProjectClient, agent_id: str, creds: AsyncTokenCredential) -> Agent:
+    """Update an existing agent with new tools"""
+    logger.info(f"Updating existing agent {agent_id} with tools")
+    
+    tools, bing_tool_added = await get_available_tool(ai_client, creds)
+    toolset = AsyncToolSet()
+    
+    # Add all tools to the toolset
+    for tool in tools:
+        toolset.add(tool)
+        logger.info(f"agent: Added tool of type: {type(tool).__name__}")
+    
+    logger.info(f"agent: Total tools added: {len(tools)}")
+    
+    # Check if we have search tools for enhanced instructions
+    has_ai_search = any(isinstance(tool, AzureAISearchTool) for tool in tools)
+    has_file_search = any(isinstance(tool, FileSearchTool) for tool in tools)
+    # Use the boolean returned from get_available_tool
+    has_bing_search = bing_tool_added or any(hasattr(tool, '_func') and 'search_web' in str(tool._func) for tool in tools)
+
+    instructions_parts = ["You are a helpful assistant that helps customers with their banking and financial questions."]
+    
+    if has_ai_search:
+        instructions_parts.append("Use AI Search for knowledge retrieval from the indexed documents.")
+    elif has_file_search:
+        instructions_parts.append("Use File Search for knowledge retrieval from uploaded files.")
+    
+    if has_bing_search:
+        instructions_parts.append("IMPORTANT: For any questions about current events, weather, news, market data, or real-time information, you have access to web search functionality.")
+        instructions_parts.append("Use the search_web function to get current information from the internet.")
+        instructions_parts.append("Always use web search for weather, news, stock prices, current events, and real-time data.")
+        instructions_parts.append("Never say you cannot provide real-time information - always use the search_web function first.")
+        logger.info("agent: Bing search tool detected and web search instructions added")
+    else:
+        logger.info("agent: No Bing search tool found in available tools")
+    
+    instructions_parts.append("Always prioritize accuracy and cite your sources appropriately.")
+    instructions_parts.append("Be concise and direct.")
+    
+    instructions = " ".join(instructions_parts)
+    
+    # Update the existing agent
+    agent = await ai_client.agents.update_agent(
+        agent_id=agent_id,
+        model=os.environ["AZURE_AI_AGENT_DEPLOYMENT_NAME"],
+        name=os.environ["AZURE_AI_AGENT_NAME"],
+        instructions=instructions,
+        toolset=toolset
+    )
+    logger.info(f"Updated agent {agent_id} with {len(tools)} tools")
+    return agent
 
 
 async def create_agent(ai_client: AIProjectClient,
                        creds: AsyncTokenCredential) -> Agent:
     logger.info("Creating new agent with resources")
-    tool = await get_available_tool(ai_client, creds)
+    tools, bing_tool_added = await get_available_tool(ai_client, creds)
     toolset = AsyncToolSet()
-    toolset.add(tool)
     
-    instructions = "Use AI Search always. Avoid to use base knowledge." if isinstance(tool, AzureAISearchTool) else "Use File Search always.  Avoid to use base knowledge."
+    # Add all tools to the toolset
+    for tool in tools:
+        toolset.add(tool)
+        logger.info(f"agent: Added tool of type: {type(tool).__name__}")
+    
+    logger.info(f"agent: Total tools added: {len(tools)}")
+    
+    # Create enhanced instructions based on available tools
+    instructions_parts = []
+    
+    # Check if we have search tools
+    has_ai_search = any(isinstance(tool, AzureAISearchTool) for tool in tools)
+    has_file_search = any(isinstance(tool, FileSearchTool) for tool in tools)
+    # Use the boolean returned from get_available_tool
+    has_bing_search = bing_tool_added or any(hasattr(tool, '_func') and 'search_web' in str(tool._func) for tool in tools)
+    has_bing_search = any('BingGroundingTool' in str(type(tool)) or 
+                         'bing' in str(type(tool)).lower() or
+                         'BingGroundingToolDefinition' in str(type(tool)) for tool in tools)
+    
+    if has_ai_search:
+        instructions_parts.append("Use AI Search for knowledge retrieval from the indexed documents.")
+    elif has_file_search:
+        instructions_parts.append("Use File Search for knowledge retrieval from uploaded files.")
+    
+    if has_bing_search:
+        instructions_parts.append("IMPORTANT: For any questions about current events, weather, news, market data, or real-time information, you have access to web search functionality.")
+        instructions_parts.append("Use the search_web function to get current information from the internet.")
+        instructions_parts.append("Always use web search for weather, news, stock prices, current events, and real-time data.")
+        instructions_parts.append("Never say you cannot provide real-time information - always use the search_web function first.")
+        logger.info("agent: Bing grounding tool detected and web search instructions added")
+    else:
+        logger.info("agent: No Bing grounding tool found in available tools")
+    
+    instructions_parts.append("Always prioritize accuracy and cite your sources appropriately.")
+    instructions_parts.append("Avoid using base knowledge when specific tools are available.")
+    
+    instructions = " ".join(instructions_parts)
     
     agent = await ai_client.agents.create_agent(
         model=os.environ["AZURE_AI_AGENT_DEPLOYMENT_NAME"],
@@ -180,6 +383,47 @@ async def create_agent(ai_client: AIProjectClient,
         toolset=toolset
     )
     return agent
+
+async def verify_agent_tools(ai_client: AIProjectClient, agent_id: str, creds: AsyncTokenCredential) -> None:
+    """Verify presence of bing_web_search tool; attempt one update if missing."""
+    try:
+        agent = await ai_client.agents.get_agent(agent_id)
+        possible_attrs = ["toolset", "tools", "_toolset"]
+        tool_names = []
+        has_bing = False
+        for attr in possible_attrs:
+            if hasattr(agent, attr):
+                obj = getattr(agent, attr)
+                iterable = []
+                if isinstance(obj, list):
+                    iterable = obj
+                elif hasattr(obj, "tools"):
+                    iterable = getattr(obj, "tools") or []
+                elif hasattr(obj, "__iter__"):
+                    try:
+                        iterable = list(obj)
+                    except Exception:
+                        pass
+                for t in iterable:
+                    name = getattr(t, "name", getattr(t, "_name", type(t).__name__))
+                    tool_names.append(name)
+                    # Check for Bing grounding tool
+                    if name == "bing_grounding" or 'BingGroundingTool' in name or 'bing' in name.lower():
+                        has_bing = True
+        if tool_names:
+            logger.info(f"agent verify: tool names discovered: {tool_names}")
+        else:
+            logger.info("agent verify: no tools enumerated from agent object")
+        if not has_bing:
+            logger.warning("agent verify: Bing grounding tool missing; attempting re-update")
+            try:
+                await update_existing_agent_with_tools(ai_client, agent_id, creds)
+            except Exception as e:  # pragma: no cover
+                logger.error(f"agent verify: re-update failed: {e}")
+        else:
+            logger.info("agent verify: Bing grounding tool present")
+    except Exception as e:  # pragma: no cover
+        logger.error(f"agent verify: failed to verify tools for agent {agent_id}: {e}")
 
 
 async def initialize_resources():
@@ -191,12 +435,22 @@ async def initialize_resources():
                 endpoint=proj_endpoint
             ) as ai_client:
                 # If the environment already has AZURE_AI_AGENT_ID or AZURE_EXISTING_AGENT_ID, try
-                # fetching that agent
+                # updating that agent with tools
                 if agentID is not None:
                     try:
-                        agent = await ai_client.agents.get_agent(
-                            agentID)
-                        logger.info(f"Found agent by ID: {agent.id}")
+                        agent = await ai_client.agents.get_agent(agentID)
+                        logger.info(f"Found existing agent by ID: {agent.id}")
+                        
+                        # Check if we need to update with tools
+                        tools, bing_tool_added = await get_available_tool(ai_client, creds)
+                        if tools:
+                            logger.info(f"Updating agent {agent.id} with {len(tools)} tools")
+                            updated_agent = await update_existing_agent_with_tools(ai_client, agent.id, creds)
+                            logger.info(f"Successfully updated agent {updated_agent.id} with tools")
+                        else:
+                            logger.info(f"No tools to add to agent {agent.id}")
+                        # Verify tool presence before returning
+                        await verify_agent_tools(ai_client, agent.id, creds)
                         return
                     except Exception as e:
                         logger.warning(
@@ -213,16 +467,27 @@ async def initialize_resources():
                                 "Found existing agent named "
                                 f"'{agent_object.name}'"
                                 f", ID: {agent_object.id}")
+                            
+                            # Update the existing agent with tools
+                            tools, bing_tool_added = await get_available_tool(ai_client, creds)
+                            if tools:
+                                logger.info(f"Updating existing agent {agent_object.id} with {len(tools)} tools")
+                                updated_agent = await update_existing_agent_with_tools(ai_client, agent_object.id, creds)
+                                logger.info(f"Successfully updated agent {updated_agent.id} with tools")
+                            # Verify after update
+                            await verify_agent_tools(ai_client, agent_object.id, creds)
                             os.environ["AZURE_EXISTING_AGENT_ID"] = agent_object.id
                             return
                         
                 # Create a new agent
+                logger.info("Creating new agent...")
                 agent = await create_agent(ai_client, creds)
                 os.environ["AZURE_EXISTING_AGENT_ID"] = agent.id
                 logger.info(f"Created agent, agent ID: {agent.id}")
+                await verify_agent_tools(ai_client, agent.id, creds)
 
     except Exception as e:
-        logger.info("Error creating agent: {e}", exc_info=True)
+        logger.error(f"Error creating agent: {e}", exc_info=True)
         raise RuntimeError(f"Failed to create the agent: {e}")
 
 
